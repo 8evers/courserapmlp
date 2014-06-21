@@ -1,0 +1,131 @@
+Practical Machine Learning Project
+========================================================
+### Initial Analysis
+
+An initial look at the data and explanations from the source show that the data is time based with window records which represent aggregate values from all the records within the window.  The submission testing set provided does not have any windowed information and the small number of records mean that the windowed data cannot be created from the test data.  A further review of the submission testing data indicated that although the data is a time-series the test data appeared to be 20 random samples from within the original training data.  This was confirmed by sorting the data by the raw time-stamps.  Based on this information splitting the training data for cross validation and estimation should be taken randomly from the training set, rather than creating time dependent samples.
+
+### Training and Cross Validation
+
+The approach taken was to cleanse the data and extract possible feature columns by first removing the windowed data, and all columns with no data. Next the date column was removed as the data was specified to greater detail in the two time stamp columns.  Finally the factor columns were split into separate binary feature columns, leaving 61 numeric features (excluding classe) labelled 'Raw' in the code.  The raw source set was split 60% (11525 records) for training and 40% for testing.  The test set was then be split 50/50 (20% of the total dataset each, approximately 3850 records each) the first set for validation and model improvement and the second for testing and prediction of out-of sample error.
+
+```{r}
+#functions and libraries
+source("projectFunctions.R")
+
+#load data
+sourceSample <- read.csv("pml-training.csv", header=TRUE, na.strings=c("","NA"))
+sourceFinalSet <- read.csv("pml-testing.csv", header=TRUE, na.strings=c("","NA"))
+
+#clean data
+cleanSample <- cleanse(sourceSample)
+cleanFinalSet <- cleanse(sourceFinalSet)
+
+#put both train and test together for expansion (don't want to expand classe)
+fullSet = rbind(cleanFinalSet[,-58], cleanSample[,-58])
+#remove X and Expand factor variables
+expandedVariables = data.frame(model.matrix(X ~ . - 1, data = fullSet)) 
+#splitt the data back into train and test
+expandedSample = expandedVariables[-1:-20,]
+expandedFinalSet = expandedVariables[1:20,]
+expandedSample["classe"] = cleanSample$classe #restore classe
+expandedFinalSet["problem_id"] = cleanFinalSet$problem_id #restore problem_id
+
+#split data for cross validation this is the Raw training set which all other variables are created from.
+inTest <- createDataPartition(expandedSample$classe, p = 0.2)[[1]]
+trainCrossValRaw <- expandedSample[-inTest,]
+testRaw <- expandedSample[inTest,]
+inCrossVal <- createDataPartition(trainCrossValRaw$classe, p = 0.25)[[1]]
+trainRaw <- trainCrossValRaw[-inCrossVal,]
+crossValRaw <- trainCrossValRaw[inCrossVal,]
+finalRaw = expandedFinalSet
+
+
+dim(trainRaw); # Raw training set
+dim(crossValRaw); #Raw cross validation set
+dim(testRaw); #raw test set for out of sample error estimation
+dim(finalRaw); #project submission set
+```
+
+### First Round
+
+Given that the initial analysis indicated that the test set was a small random sample of the original training set and that the 'classe' predictor variable did not vary in the surrounding rows when the data was sorted by time stamp, the first model tried was K nearest neighbour (KNN) with principal component analysis (PCA) to retain 99% of the variance reducing the number of variables to predict. Caret default parameters were used.
+
+The initial results were very promising showing 95.3% accuracy on the cross validation data set.
+```{r}
+#Round1
+preproc1 <- preProcess(trainRaw[,-62], method="pca", thresh=.99)
+trainPCA <- predict(preproc1, trainRaw[,-62])
+crossValPCA <- predict(preproc1, crossValRaw[,-62])
+finalPCA <- predict(preproc1, finalRaw[,-62])
+fitPCA <- train(trainRaw$classe~.,data=trainPCA, method="knn")
+predictPCA <- predict(fitPCA, crossValPCA)
+predictFinaLPCA <- predict(fitPCA, finalPCA)
+confusionMatrix(crossValRaw$classe, predictPCA)
+```
+
+### Second Round
+
+Given the promising results in round one further review of the feature columns was undertaken to determine which features were the best predictors for the KNN model.  The first test was to try the person name and time stamp features, here the first 6 columns were binary indicators of the person (as discussed above in converting factors to binary features) and the two raw time stamp columns were converted into a single time stamp column by combining the two parts.  The first time stamp column 'raw_timestamp_part_1' measures seconds, this was reduced to a smaller range by taking the minimum in the training set from all values, the second time stamp 'raw_timestamp_part_2' represents millionths of a second, this was divided by 1,000,000 and added to the adjusted first timestamp to create a single time column. These 7 columns were used with KNN for the second test.
+
+NOTE: where transforms were applied the same transforms were applied to all other datasets, using the values calculated from the training set.   
+
+```{r}
+minTs <- min(trainRaw$raw_timestamp_part_1)
+trainCols <- trainRaw[,1:6]
+crossValCols <- crossValRaw[,1:6]
+testCols = testRaw[,1:6]
+finalCols = finalRaw[,1:6]
+trainCols["timestamp"] <- as.double(trainRaw$raw_timestamp_part_1 - minTs) + as.double(trainRaw$raw_timestamp_part_2) / 1000000.0
+crossValCols["timestamp"] <- as.double(crossValRaw$raw_timestamp_part_1 - minTs) + as.double(crossValRaw$raw_timestamp_part_2) / 1000000.0
+testCols["timestamp"] <- as.double(testRaw$raw_timestamp_part_1 - minTs) + as.double(testRaw$raw_timestamp_part_2) / 1000000.0
+finalCols["timestamp"] <- as.double(expandedFinalSet$raw_timestamp_part_1 - minTs) + as.double(expandedFinalSet$raw_timestamp_part_2) / 1000000.0
+
+fitCols <- train(trainRaw$classe~.,data=trainCols, method="knn")
+predictCols <- predict(fitCols, crossValCols)
+confusionMatrix(crossValRaw$classe, predictCols)
+predictFinalCols <- predict(fitCols, finalCols)
+
+```
+The second set of results had accuracy of over 99.7% on the cross validation set.
+
+These results were good enough to submit 20 test items for full marks
+
+### Third Round
+
+It doesn't seem realistic for a machine learning task like this where clearly the goal is to predict the outcome 'classe' from the accelerometer readings rather than the time of day and person so that the results are more generally applicable.  If a second test set was introduced, taken a year later the second algorithm is unlikely to anything close to an accurate answer.  So although it is possible to predict the test set with the time based columns, the third round tries to remove these columns and only use the accelerometer columns to predict the outcome.  A number of models were tried using default parameters, results not supplied in code for brevity, KNN produced a poor 28% accuracy, SVM (Support Vector Machine) was promising with 80%, however the model chosen to tune was Radial SVM as the initial accuracy was slightly higher than 92%.
+
+Caret's tune grid parameter was used to quickly reach an accuracy of 99% with C = 4 and sigma=0.08 this was further refined to 99.4% on the cross validation set with a sigma of 0.03 and C = 128. Further refinements could be made but the returns seemed minimal.     
+
+```{r}
+trainNoTime <- trainRaw[,c(-1:-9,-63)]
+crossValNoTime <- crossValRaw[,c(-1:-9,-63)]
+testNoTime <- testRaw[,c(-1:-9,-63)]
+
+svmGrid <-  expand.grid(C=c(128), sigma=c(0.03)) #only run one point for final output.
+fitNoTime = train(trainRaw$classe~.,data=trainNoTime, verbose = TRUE, method="svmRadial", preProcess=c("center", "scale"), tuneGrid=svmGrid)
+predictNoTime <- predict(fitNoTime, crossValNoTime)
+confusionMatrix(crossValNoTime$classe, predictNoTime)
+```
+
+### Estimation of Out of Sample Error
+
+The estimation of the out-of sample error was performed on the reserved 20% of the training data and was only assessed once against the KNN model and SVM model after both had been tuned.
+
+```{r}
+#Out of Sample Error
+e2 <- confusionMatrix(testRaw$classe, predict(fitCols, testCols))
+e3 <- confusionMatrix(testRaw$classe, predict(fitNoTime, testNoTime))
+```
+
+Round 2 KNN - Estimate of Out of Sample Error  
+Accuracy = `r (e2$overall["Accuracy"])*100` % with a 95% Conficence Interval of (`r (e2$overall["AccuracyLower"])*100`% to `r (e2$overall["AccuracyUpper"])*100`%)
+Error = `r (1-e2$overall["Accuracy"])*100` % with a 95% Conficence Interval of (`r (1-e2$overall["AccuracyUpper"])*100`% to `r (1-e2$overall["AccuracyLower"])*100`%)
+
+Round 3 SVM Radial - Estimate of Out of Sample Error  
+Accuracy = `r (e3$overall["Accuracy"])*100` % with a 95% Conficence Interval of (`r (e3$overall["AccuracyLower"])*100`% to `r (e3$overall["AccuracyUpper"])*100`%)
+Error = `r (1-e3$overall["Accuracy"])*100` % with a 95% Conficence Interval of (`r (1-e3$overall["AccuracyUpper"])*100`% to `r (1-e3$overall["AccuracyLower"])*100`%)
+
+### Conclusion
+
+Although very high accuracy rates were achieved, to make this model more generally applicable a validation and testing set should contain an independent set of data using different people recorded at different times.  Even in this analysis where the time and person columns were removed the act of randomly sampling the data from the training set and ignoring the sequential nature of the data will impact the ability to generalise the solution. 
+
